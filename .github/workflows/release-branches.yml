@@ -50,3 +50,58 @@ jobs:
           BRANCHES: ${{ inputs.branches }}
           DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
         run: bash .github/scripts/release-branches.sh
+
+  # Opens a PR in the (private) Docker image build pipeline repository that bumps each product's
+  # docker_release_version to its latest tag here. The repository's location is held only in secrets,
+  # which GitHub masks in this public repository's logs. Skipped until the secrets are configured:
+  #   PIPELINE_REPO_OWNER, PIPELINE_REPO_NAME, PIPELINE_BASE_BRANCH, PIPELINE_FILE_PATH
+  #   and either PIPELINE_APP_ID + PIPELINE_APP_PRIVATE_KEY (GitHub App, preferred) or PIPELINE_TOKEN
+  update-build-pipeline:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PIPELINE_REPO_OWNER: ${{ secrets.PIPELINE_REPO_OWNER }}
+      PIPELINE_REPO_NAME: ${{ secrets.PIPELINE_REPO_NAME }}
+      PIPELINE_BASE_BRANCH: ${{ secrets.PIPELINE_BASE_BRANCH }}
+      PIPELINE_FILE_PATH: ${{ secrets.PIPELINE_FILE_PATH }}
+      HAS_APP: ${{ secrets.PIPELINE_APP_ID != '' }}
+      HAS_TOKEN: ${{ secrets.PIPELINE_TOKEN != '' }}
+    steps:
+      - name: Check configuration
+        id: config
+        run: |
+          if [[ -n "$PIPELINE_REPO_OWNER" && -n "$PIPELINE_REPO_NAME" && -n "$PIPELINE_BASE_BRANCH" \
+                && -n "$PIPELINE_FILE_PATH" && ( "$HAS_APP" == "true" || "$HAS_TOKEN" == "true" ) ]]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Build pipeline secrets are not configured; skipping the version update PR."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout default branch
+        if: steps.config.outputs.enabled == 'true'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      - name: Create GitHub App token
+        id: app-token
+        if: steps.config.outputs.enabled == 'true' && env.HAS_APP == 'true'
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.PIPELINE_APP_ID }}
+          private-key: ${{ secrets.PIPELINE_APP_PRIVATE_KEY }}
+          owner: ${{ secrets.PIPELINE_REPO_OWNER }}
+          repositories: ${{ secrets.PIPELINE_REPO_NAME }}
+
+      - name: Open or update build pipeline PR
+        if: steps.config.outputs.enabled == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PIPELINE_TOKEN: ${{ steps.app-token.outputs.token || secrets.PIPELINE_TOKEN }}
+          PIPELINE_REPO: ${{ secrets.PIPELINE_REPO_OWNER }}/${{ secrets.PIPELINE_REPO_NAME }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+        run: bash .github/scripts/update-build-pipeline.sh
